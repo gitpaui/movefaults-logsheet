@@ -156,3 +156,9 @@ textarea { resize: vertical; font-family: inherit; }
 .pill.st-Queued { background: rgba(232,163,61,.18); color: #b5781c; }
 .pill.st-Submitted { background: rgba(60,154,95,.15); color: #2f7a4b; }
 .list-item .msg { margin-top: 6px; }
+
+/* ---------- Header logos ---------- */
+.bar-logo { height: 34px; width: auto; max-width: 38%; object-fit: contain; display: block; }
+.bar-logo.left { object-position: left center; }
+.bar-logo.right { object-position: right center; }
+@media (min-width: 600px) { .bar-logo { height: 42px; } }
