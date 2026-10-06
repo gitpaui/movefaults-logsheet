@@ -33,7 +33,7 @@ const setPath = (obj, path, val) => {
   o[keys[keys.length - 1]] = val;
 };
 
-/* ---------- IndexedDB (data stays on the phone) ---------- */
+/* ---------- IndexedDB (data stays on the device) ---------- */
 let _db;
 function db() {
   if (_db) return Promise.resolve(_db);
@@ -137,7 +137,7 @@ function showLogin(msg) {
   p.addEventListener('keydown', e => { if (e.key === 'Enter') go.click(); });
   go.onclick = async () => {
     const m = document.getElementById('msg');
-    if (!navigator.onLine) { m.textContent = 'You need signal to log in. Drafts already on this phone are safe.'; return; }
+    if (!navigator.onLine) { m.textContent = 'You need signal to log in. Drafts already on this device are safe.'; return; }
     go.disabled = true; go.textContent = 'Checking...'; m.textContent = '';
     try {
       const r = await api('login', { username: u.value, password: p.value });
@@ -156,7 +156,7 @@ function showLogin(msg) {
 }
 
 async function logout() {
-  if (!confirm('Log out? Drafts stay saved on this phone.')) return;
+  if (!confirm('Log out? Drafts stay saved on this device.')) return;
   S.session = null;
   await kvSet('session', null);
   showLogin();
@@ -177,7 +177,7 @@ async function showHome() {
     <button class="btn" id="new">New Log Sheet</button>
     <div class="card" style="margin-top:14px">
       <div class="between">
-        <h2 style="margin:0">Drafts on this phone</h2>
+        <h2 style="margin:0">Drafts on this device</h2>
         <span class="pill">${drafts.length}</span>
       </div>
       ${drafts.length ? drafts.map(d => `
@@ -283,7 +283,7 @@ function scheduleSave() {
     S.draft.updatedAt = Date.now();
     await draftPut(S.draft);
     const e2 = document.getElementById('saved');
-    if (e2) e2.textContent = 'Saved on this phone · ' + new Date().toLocaleTimeString('en-PH', { timeStyle: 'short' });
+    if (e2) e2.textContent = 'Saved on this device · ' + new Date().toLocaleTimeString('en-PH', { timeStyle: 'short' });
   }, 400);
 }
 
@@ -306,7 +306,7 @@ function showForm(d) {
   $app.innerHTML = `
     <div class="between">
       <button class="btn small ghost" id="back">← Home</button>
-      <div class="saved" id="saved">Saved on this phone</div>
+      <div class="saved" id="saved">Saved on this device</div>
     </div>
 
     <div class="card" style="margin-top:12px">
@@ -351,7 +351,7 @@ function showForm(d) {
 
   document.getElementById('back').onclick = () => { clearTimeout(saveTimer); draftPut(S.draft).then(showHome); };
   document.getElementById('del').onclick = async () => {
-    if (!confirm('Delete this draft from the phone? This cannot be undone.')) return;
+    if (!confirm('Delete this draft from the device? This cannot be undone.')) return;
     await draftDel(d.id);
     showHome();
   };
