@@ -1,4 +1,4 @@
-/***** MOVE Faults – Digital Logsheet PWA (Day 2) *****/
+/***** MOVE Faults – Digital Logsheet PWA *****/
 
 const API_URL = window.LS_CONFIG.API_URL;
 const PARTY = ['ABB','ERPE','NJTM','PPG','RDR','ADSP','ARLA','RAEN','ARP','CJVC','PDFB','TCB','ZAGR'];
@@ -11,9 +11,16 @@ const EQ_ROWS = [
   ['antennaSerial',  'Antenna serial no.',   'antennaSerial'],
   ['antennaHeight',  'Antenna height (m)',   null]
 ];
+const SYSTEM_ITEMS = [
+  ['receiver', 'Receiver'], ['solarCharger', 'Solar charger'], ['controller', 'Controller'],
+  ['exhaustFan', 'Exhaust fan'], ['indicatorLight', 'Indicator light']
+];
+const CHARGERS = ['AC', 'DC', 'AC/DC', 'Solar'];
+const SESSIONS = ['01S_01H', '30S_01H'];
+const STATION_STATUSES = ['Active', 'Under Maintenance', 'Decommissioned', 'Archived'];
 
 const $app = document.getElementById('app');
-const S = { session: null, stations: [], stationsAt: null, draft: null };
+const S = { session: null, stations: [], stationsAt: null, draft: null, screen: '' };
 
 /* ---------- Helpers ---------- */
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
@@ -29,20 +36,22 @@ const getPath = (obj, path) => path.split('.').reduce((o, k) => (o ? o[k] : unde
 const setPath = (obj, path, val) => {
   const keys = path.split('.');
   let o = obj;
-  keys.slice(0, -1).forEach(k => { if (!o[k]) o[k] = {}; o = o[k]; });
+  keys.slice(0, -1).forEach(k => { if (!o[k] || typeof o[k] !== 'object') o[k] = {}; o = o[k]; });
   o[keys[keys.length - 1]] = val;
 };
+const yn = () => ({ ok: '', remarks: '' });
 
 /* ---------- IndexedDB (data stays on the device) ---------- */
 let _db;
 function db() {
   if (_db) return Promise.resolve(_db);
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open('mf-logsheet', 1);
+    const req = indexedDB.open('mf-logsheet', 2);
     req.onupgradeneeded = () => {
       const d = req.result;
-      d.createObjectStore('kv');
-      d.createObjectStore('drafts', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+      if (!d.objectStoreNames.contains('drafts')) d.createObjectStore('drafts', { keyPath: 'id' });
+      if (!d.objectStoreNames.contains('photos')) d.createObjectStore('photos', { keyPath: 'id' });
     };
     req.onsuccess = () => { _db = req.result; resolve(_db); };
     req.onerror = () => reject(req.error);
@@ -62,6 +71,11 @@ const kvSet = (k, v) => idb('kv', 'readwrite', s => s.put(v, k));
 const draftsAll = () => idb('drafts', 'readonly', s => s.getAll());
 const draftPut = d => idb('drafts', 'readwrite', s => s.put(d));
 const draftDel = id => idb('drafts', 'readwrite', s => s.delete(id));
+const photosAll = () => idb('photos', 'readonly', s => s.getAll());
+const photoPut = p => idb('photos', 'readwrite', s => s.put(p));
+const photoDel = id => idb('photos', 'readwrite', s => s.delete(id));
+const photosFor = async draftId => (await photosAll()).filter(p => p.draftId === draftId)
+  .sort((a, b) => a.addedAt - b.addedAt);
 
 /* ---------- API ---------- */
 async function api(action, data) {
@@ -74,9 +88,15 @@ async function api(action, data) {
   const text = await res.text();
   let json;
   try { json = JSON.parse(text); }
-  catch (e) { throw new Error('Server did not reply with data. Check the web app URL in config.js and that the deployment is updated (HTTP ' + res.status + ').'); }
+  catch (e) { throw new Error('Server did not reply with data (HTTP ' + res.status + ').'); }
   if (!json.ok) throw new Error(json.error || 'Request failed');
   return json;
+}
+
+async function markExpired() {
+  if (!S.session) return;
+  S.session.expires = 0;
+  await kvSet('session', S.session);
 }
 
 async function refreshStations(silent) {
@@ -87,17 +107,73 @@ async function refreshStations(silent) {
     S.stationsAt = Date.now();
     await kvSet('stations', S.stations);
     await kvSet('stationsAt', S.stationsAt);
-    if (!S.draft) showHome();
+    if (S.screen === 'home') showHome();
   } catch (err) {
-    if (err.message === 'Session expired') {
-      S.session.expires = 0;
-      await kvSet('session', S.session);
-      if (!S.draft) showHome();
-    } else if (!silent) {
-      alert('Could not refresh stations: ' + err.message);
-    }
+    if (err.message === 'Session expired') { await markExpired(); if (S.screen === 'home') showHome(); }
+    else if (!silent) alert('Could not refresh stations: ' + err.message);
   }
 }
+
+/* ---------- Sync queue ---------- */
+let syncing = false;
+function buildPayload(d, photos) {
+  const p = d.prefill || {};
+  return {
+    id: d.id, siteCode: d.siteCode, createdBy: d.createdBy, createdAt: d.createdAt,
+    visit: d.visit, equipment: d.equipment, system: d.system, power: d.power,
+    network: d.network, receiverConfig: d.receiverConfig, ftp: d.ftp, download: d.download,
+    notes: d.notes, contact: d.contact, stationStatusAfter: d.stationStatusAfter,
+    mismatches: d.mismatches,
+    siteMetaDataSnapshot: {
+      status: p.status, receiverModel: p.receiverModel, receiverSerial: p.receiverSerial,
+      antennaModel: p.antennaModel, antennaSerial: p.antennaSerial, power: p.power
+    },
+    photosFolderUrl: d.photosFolderUrl || '',
+    photos: photos.filter(x => x.uploaded).map(x => ({ id: x.id, group: x.group, url: x.url, fileId: x.fileId }))
+  };
+}
+
+async function syncOne(d) {
+  const visitDate = (d.visit.datetime || '').slice(0, 10) || localNow().slice(0, 10);
+  const photos = await photosFor(d.id);
+  for (const p of photos) {
+    if (p.uploaded) continue;
+    const r = await api('uploadPhoto', {
+      logsheetId: d.id, siteCode: d.siteCode, folderUrl: (d.prefill || {}).folderUrl || '',
+      visitDate: visitDate, photoId: p.id, group: p.group, dataUrl: p.dataUrl
+    });
+    p.uploaded = true; p.url = r.url; p.fileId = r.fileId;
+    d.photosFolderUrl = r.folderUrl;
+    await photoPut(p);
+  }
+  const r = await api('submitLogsheet', { logsheet: buildPayload(d, await photosFor(d.id)) });
+  d.status = 'Submitted';
+  d.serverVersion = r.version;
+  d.syncedAt = Date.now();
+  d.syncError = '';
+  await draftPut(d);
+}
+
+async function syncAll() {
+  if (syncing || !navigator.onLine || !tokenValid()) return;
+  syncing = true;
+  try {
+    const queued = (await draftsAll()).filter(d => d.status === 'Queued');
+    for (const d of queued) {
+      try {
+        await syncOne(d);
+      } catch (err) {
+        if (err.message === 'Session expired') { await markExpired(); break; }
+        d.syncError = err.message;
+        await draftPut(d);
+      }
+    }
+  } finally {
+    syncing = false;
+    if (S.screen === 'home') showHome();
+  }
+}
+setInterval(syncAll, 60000);
 
 /* ---------- Network indicator ---------- */
 function updateNet() {
@@ -105,12 +181,12 @@ function updateNet() {
   el.className = 'net ' + (navigator.onLine ? 'on' : 'off');
   el.textContent = navigator.onLine ? 'Online' : 'Offline';
 }
-window.addEventListener('online', () => { updateNet(); refreshStations(true); });
+window.addEventListener('online', () => { updateNet(); refreshStations(true); syncAll(); });
 window.addEventListener('offline', updateNet);
 
 /* ---------- Login ---------- */
 function showLogin(msg) {
-  S.draft = null;
+  S.draft = null; S.screen = 'login';
   document.body.classList.add('login-mode');
   const lastUser = S.session ? S.session.user : '';
   $app.innerHTML = `
@@ -146,9 +222,10 @@ function showLogin(msg) {
       go.textContent = 'Loading stations...';
       await refreshStations(false);
       showHome();
+      syncAll();
     } catch (err) {
       m.textContent = err.message === 'Failed to fetch'
-        ? 'Could not reach the server. Check your signal and the web app URL in config.js.'
+        ? 'Could not reach the server. Check your signal.'
         : err.message;
       go.disabled = false; go.textContent = 'Log in';
     }
@@ -156,44 +233,66 @@ function showLogin(msg) {
 }
 
 async function logout() {
-  if (!confirm('Log out? Drafts stay saved on this device.')) return;
+  if (!confirm('Log out? Drafts and unsent logsheets stay saved on this device.')) return;
   S.session = null;
   await kvSet('session', null);
   showLogin();
 }
 
 /* ---------- Home ---------- */
+function draftCard(d) {
+  const label = { Draft: 'Draft', Queued: 'Waiting to sync', Submitted: 'Submitted' }[d.status] || d.status;
+  return `
+    <button class="list-item" data-open="${esc(d.id)}">
+      <div class="between"><b>${esc(d.siteCode)}</b><span class="pill st-${esc(d.status)}">${esc(label)}${d.serverVersion ? ' v' + d.serverVersion : ''}</span></div>
+      <div class="muted">${esc(d.visit.address || '')}</div>
+      <div class="muted">Visit: ${esc((d.visit.datetime || '').replace('T', ' '))} · Edited ${esc(fmtDate(d.updatedAt))}</div>
+      ${d.syncError ? `<div class="msg err">Not sent yet: ${esc(d.syncError)}</div>` : ''}
+    </button>`;
+}
+
 async function showHome() {
-  S.draft = null;
+  S.draft = null; S.screen = 'home';
   document.body.classList.remove('login-mode');
-  const drafts = (await draftsAll()).sort((a, b) => b.updatedAt - a.updatedAt);
+  const all = (await draftsAll()).sort((a, b) => b.updatedAt - a.updatedAt);
+  const drafts = all.filter(d => d.status === 'Draft');
+  const queued = all.filter(d => d.status === 'Queued');
+  const sent = all.filter(d => d.status === 'Submitted');
   const expired = !tokenValid();
   $app.innerHTML = `
-    ${expired ? `<div class="banner">Your session has ended. You can keep filling drafts offline. <a href="#" id="relog" style="color:inherit;font-weight:700">Log in again</a> to sync.</div>` : ''}
+    ${expired ? `<div class="banner">Your session has ended. You can keep filling logsheets offline. <a href="#" id="relog" style="color:inherit;font-weight:700">Log in again</a> to sync.</div>` : ''}
     <div class="between" style="margin-bottom:12px">
       <div class="white">Hi, <b>${esc(S.session.user)}</b> <span class="pill">${esc((S.session.roles || []).join(', '))}</span></div>
       <button class="btn small ghost" id="out">Log out</button>
     </div>
     <button class="btn" id="new">New Log Sheet</button>
-    <div class="card" style="margin-top:14px">
-      <div class="between">
-        <h2 style="margin:0">Drafts on this device</h2>
-        <span class="pill">${drafts.length}</span>
-      </div>
-      ${drafts.length ? drafts.map(d => `
-        <button class="list-item" data-open="${esc(d.id)}">
-          <div class="between"><b>${esc(d.siteCode)}</b><span class="pill">${esc(d.status)}</span></div>
-          <div class="muted">${esc(d.visit.address || '')}</div>
-          <div class="muted">Visit: ${esc((d.visit.datetime || '').replace('T', ' '))} · Edited ${esc(fmtDate(d.updatedAt))}</div>
-        </button>`).join('') : '<p class="muted">No drafts yet.</p>'}
+    <div class="stats">
+      <div class="stat"><b>${queued.length}</b><span>waiting to sync</span></div>
+      <div class="stat"><b>${sent.length}</b><span>submitted</span></div>
     </div>
+    ${queued.length ? `
+    <div class="card">
+      <div class="between"><h2 style="margin:0">Waiting to sync</h2>
+        <button class="btn small ghost dark" id="syncNow" ${syncing ? 'disabled' : ''}>${syncing ? 'Syncing...' : 'Sync now'}</button></div>
+      ${queued.map(draftCard).join('')}
+    </div>` : ''}
+    <div class="card">
+      <div class="between"><h2 style="margin:0">Drafts on this device</h2><span class="pill">${drafts.length}</span></div>
+      ${drafts.length ? drafts.map(draftCard).join('') : '<p class="muted">No drafts. Tap New Log Sheet to start one.</p>'}
+    </div>
+    ${sent.length ? `
+    <div class="card">
+      <div class="between"><h2 style="margin:0">Submitted</h2><span class="pill">${sent.length}</span></div>
+      <p class="muted" style="margin:6px 0 0">Open one to correct it and submit changes.</p>
+      ${sent.map(draftCard).join('')}
+    </div>` : ''}
     <div class="card">
       <div class="between">
         <div>
           <b>${S.stations.length}</b> <span class="muted">stations saved for offline use</span>
           <div class="muted">Updated ${esc(fmtDate(S.stationsAt))}</div>
         </div>
-        <button class="btn small ghost" id="ref">Refresh</button>
+        <button class="btn small ghost dark" id="ref">Refresh</button>
       </div>
     </div>`;
   document.getElementById('out').onclick = logout;
@@ -202,6 +301,12 @@ async function showHome() {
     if (!navigator.onLine) return alert('No signal. Stations will refresh when you are back online.');
     if (!tokenValid()) return showLogin('Session ended. Log in to refresh.');
     await refreshStations(false);
+  };
+  const sn = document.getElementById('syncNow');
+  if (sn) sn.onclick = () => {
+    if (!navigator.onLine) return alert('No signal. Logsheets will send automatically when you are back online.');
+    if (!tokenValid()) return showLogin('Session ended. Log in to sync.');
+    syncAll(); showHome();
   };
   const relog = document.getElementById('relog');
   if (relog) relog.onclick = e => { e.preventDefault(); showLogin(); };
@@ -217,6 +322,7 @@ function showPicker() {
     alert('No stations saved yet. Connect to signal and tap Refresh.');
     return;
   }
+  S.screen = 'picker';
   $app.innerHTML = `
     <button class="btn small ghost" id="back">← Back</button>
     <div class="card" style="margin-top:12px">
@@ -243,10 +349,42 @@ function showPicker() {
   q.focus();
 }
 
+/* ---------- Draft shape ---------- */
+function powerPrefill(power) {
+  const t = norm(power);
+  return {
+    battery: t.includes('BATTERY') ? 'With battery' : '',
+    batteryStatus: '',
+    charger: t.includes('SOLAR') ? ['Solar'] : t.includes('AC TO DC') ? ['AC/DC'] : [],
+    chargerStatus: ''
+  };
+}
+
+function defaultSections(st) {
+  return {
+    system: { receiver: yn(), solarCharger: yn(), controller: yn(), exhaustFan: yn(), indicatorLight: yn() },
+    power: powerPrefill(st.power),
+    network: { router: yn(), simReplaced: yn(), loadSufficient: yn() },
+    receiverConfig: { logging: yn(), sdCard: { level: '', remarks: '' }, navPosition: { level: '', remarks: '' } },
+    ftp: { phivolcs: yn(), namria: yn() },
+    download: { sessions: [], other: '' },
+    notes: '',
+    contact: { person: '', number: '', designation: '', email: '' },
+    stationStatusAfter: st.status || ''
+  };
+}
+
+function ensureShape(d) {
+  const defs = defaultSections(d.prefill || {});
+  Object.keys(defs).forEach(k => { if (d[k] == null) d[k] = defs[k]; });
+  if (!d.mismatches) d.mismatches = [];
+  return d;
+}
+
 async function startDraft(code) {
   const st = S.stations.find(s => s.code === code);
   const now = Date.now();
-  const d = {
+  const d = Object.assign({
     id: crypto.randomUUID(),
     siteCode: st.code,
     status: 'Draft',
@@ -268,23 +406,56 @@ async function startDraft(code) {
       powerFailure: ''
     },
     mismatches: []
-  };
+  }, defaultSections(st));
   await draftPut(d);
   showForm(d);
 }
 
-/* ---------- Form (Sections A–B) ---------- */
+/* ---------- Form building blocks ---------- */
+const choice = (path, options, cur, cls) => `
+  <div class="choice ${cls || ''}" data-choice="${path}">
+    ${options.map(o => `<button type="button" data-v="${esc(o)}" class="${o === cur ? 'on' : ''} ${cls === 'lvl' ? 'l-' + o.toLowerCase() : ''}">${esc(o)}</button>`).join('')}
+  </div>`;
+const multi = (path, options, cur) => `
+  <div class="choice" data-multi="${path}">
+    ${options.map(o => `<button type="button" data-v="${esc(o)}" class="${(cur || []).includes(o) ? 'on' : ''}">${esc(o)}</button>`).join('')}
+  </div>`;
+const text = (path, val, ph, type) =>
+  `<input data-path="${path}" value="${esc(val)}" placeholder="${esc(ph || '')}" ${type ? 'type="' + type + '"' : ''}>`;
+const photoBox = group => `
+  <div class="photos">
+    <div class="thumbs" id="thumbs-${group}"></div>
+    <label class="addphoto">+ Add photo<input type="file" accept="image/*" multiple data-photo="${group}" hidden></label>
+  </div>`;
+const ynItem = (base, label, obj, photoGroup) => `
+  <div class="item">
+    <div class="item-label">${label}</div>
+    ${choice(base + '.ok', ['Yes', 'No'], obj.ok)}
+    ${text(base + '.remarks', obj.remarks, 'Remarks')}
+    ${photoGroup ? photoBox(photoGroup) : ''}
+  </div>`;
+const lvlItem = (base, label, obj) => `
+  <div class="item">
+    <div class="item-label">${label}</div>
+    ${choice(base + '.level', ['Red', 'Orange', 'Green'], obj.level, 'lvl')}
+    ${text(base + '.remarks', obj.remarks, 'Remarks')}
+  </div>`;
+
+/* ---------- Save + mismatch ---------- */
 let saveTimer;
 function scheduleSave() {
   const el = document.getElementById('saved');
   if (el) el.textContent = 'Saving...';
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(async () => {
-    S.draft.updatedAt = Date.now();
-    await draftPut(S.draft);
-    const e2 = document.getElementById('saved');
-    if (e2) e2.textContent = 'Saved on this device · ' + new Date().toLocaleTimeString('en-PH', { timeStyle: 'short' });
-  }, 400);
+  saveTimer = setTimeout(saveNow, 400);
+}
+async function saveNow() {
+  clearTimeout(saveTimer);
+  if (!S.draft) return;
+  S.draft.updatedAt = Date.now();
+  await draftPut(S.draft);
+  const el = document.getElementById('saved');
+  if (el) el.textContent = 'Saved on this device · ' + new Date().toLocaleTimeString('en-PH', { timeStyle: 'short' });
 }
 
 function computeMismatches() {
@@ -297,28 +468,76 @@ function computeMismatches() {
     const el = document.getElementById('flag-' + key);
     if (el) el.classList.toggle('show', flagged);
   });
+  const stWas = d.prefill.status || '', stNow = d.stationStatusAfter || '';
+  const stFlag = norm(stWas) !== norm(stNow);
+  if (stFlag) list.push({ field: 'stationStatus', label: 'Station status', sitemetadata: stWas, field_value: stNow });
+  const sf = document.getElementById('flag-stationStatus');
+  if (sf) sf.classList.toggle('show', stFlag);
   d.mismatches = list;
 }
 
+/* ---------- Photos ---------- */
+function compressImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const max = 1600;
+      const s = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * s);
+      c.height = Math.round(img.height * s);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', 0.75));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read image')); };
+    img.src = url;
+  });
+}
+
+async function renderThumbs(group) {
+  const box = document.getElementById('thumbs-' + group);
+  if (!box || !S.draft) return;
+  const list = (await photosFor(S.draft.id)).filter(p => p.group === group);
+  box.innerHTML = list.map(p => `
+    <div class="thumb">
+      <img src="${p.dataUrl}" alt="">
+      ${p.uploaded ? '<span class="up">Uploaded</span>' : ''}
+      <button type="button" data-delphoto="${p.id}" aria-label="Remove photo">×</button>
+    </div>`).join('');
+  box.querySelectorAll('[data-delphoto]').forEach(b => b.onclick = async () => {
+    if (!confirm('Remove this photo?')) return;
+    await photoDel(b.dataset.delphoto);
+    renderThumbs(group);
+    scheduleSave();
+  });
+}
+
+/* ---------- Form ---------- */
 function showForm(d) {
-  S.draft = d;
+  S.draft = ensureShape(d);
+  S.screen = 'form';
   const st = d.prefill;
+  const submitLabel = d.status === 'Submitted' ? 'Submit changes' : 'Submit Log Sheet';
   $app.innerHTML = `
     <div class="between">
       <button class="btn small ghost" id="back">← Home</button>
       <div class="saved" id="saved">Saved on this device</div>
     </div>
+    ${d.status === 'Submitted' ? `<div class="banner" style="margin-top:12px">Submitted as v${d.serverVersion || 1}. Changes save on this device; tap <b>Submit changes</b> to send them for approval again.</div>` : ''}
+    ${d.status === 'Queued' ? `<div class="banner" style="margin-top:12px">Waiting to sync. Edits you make now will be included when it sends.</div>` : ''}
 
     <div class="card" style="margin-top:12px">
       <h3>A. Visit details</h3>
       <div class="between"><h2 style="margin:0">${esc(d.siteCode)}${st.alias ? ' / ' + esc(st.alias) : ''}</h2><span class="pill">${esc(st.status)}</span></div>
       <p class="muted" style="margin:6px 0 0">${esc(st.region)} · Last visit ${esc(st.lastVisit || '—')}</p>
       <label>Address</label>
-      <input data-path="visit.address" value="${esc(d.visit.address)}">
+      ${text('visit.address', d.visit.address)}
       <label>Date and time of visit (local)</label>
       <input type="datetime-local" data-path="visit.datetime" value="${esc(d.visit.datetime)}">
       <label>Field party — tap everyone present</label>
-      <div class="chips">${PARTY.map(p => `<button class="chip ${d.visit.party.includes(p) ? 'on' : ''}" data-party="${p}">${p}</button>`).join('')}</div>
+      <div class="chips">${PARTY.map(p => `<button type="button" class="chip ${d.visit.party.includes(p) ? 'on' : ''}" data-party="${p}">${p}</button>`).join('')}</div>
       <p class="muted" id="partyCount" style="margin-top:8px">${d.visit.party.length} of ${PARTY.length} selected</p>
     </div>
 
@@ -340,28 +559,118 @@ function showForm(d) {
         </tbody>
       </table>
       <label>Power failure?</label>
-      <div class="yn" data-yn="equipment.powerFailure">
-        <button data-v="Yes" class="${d.equipment.powerFailure === 'Yes' ? 'on' : ''}">Yes</button>
-        <button data-v="No" class="${d.equipment.powerFailure === 'No' ? 'on' : ''}">No</button>
+      ${choice('equipment.powerFailure', ['Yes', 'No'], d.equipment.powerFailure)}
+    </div>
+
+    <div class="card">
+      <h3>C. System check</h3>
+      <p class="muted" style="margin-top:0">Are the following functional?</p>
+      ${SYSTEM_ITEMS.map(([k, label]) => ynItem('system.' + k, label, d.system[k])).join('')}
+    </div>
+
+    <div class="card">
+      <h3>D. Power source check</h3>
+      <div class="item">
+        <div class="item-label">Battery</div>
+        ${choice('power.battery', ['With battery', 'Without battery'], d.power.battery)}
+        ${text('power.batteryStatus', d.power.batteryStatus, 'Battery status (e.g. 12.6 V, good)')}
+      </div>
+      <div class="item">
+        <div class="item-label">Charger type — tick all that apply</div>
+        ${multi('power.charger', CHARGERS, d.power.charger)}
+        ${text('power.chargerStatus', d.power.chargerStatus, 'Charger status')}
       </div>
     </div>
 
-    <div class="todo">Sections C–L (checklists, photos, contact person, station status, Submit) arrive in Week 2.</div>
-    <button class="btn danger" id="del" style="margin-top:14px">Delete this draft</button>`;
+    <div class="card">
+      <h3>E. Network connectivity check</h3>
+      ${ynItem('network.router', 'Router functional?', d.network.router)}
+      ${ynItem('network.simReplaced', 'SIM replacement done?', d.network.simReplaced, 'simReplaced')}
+      ${ynItem('network.loadSufficient', 'Prepaid load sufficient?', d.network.loadSufficient, 'loadSufficient')}
+    </div>
 
-  document.getElementById('back').onclick = () => { clearTimeout(saveTimer); draftPut(S.draft).then(showHome); };
+    <div class="card">
+      <h3>F. Receiver configuration check</h3>
+      ${ynItem('receiverConfig.logging', 'Is the unit logging?', d.receiverConfig.logging)}
+      ${lvlItem('receiverConfig.sdCard', 'SD card storage indicator', d.receiverConfig.sdCard)}
+      ${lvlItem('receiverConfig.navPosition', 'Navigated position indicator', d.receiverConfig.navPosition)}
+    </div>
+
+    <div class="card">
+      <h3>G. FTP push test</h3>
+      ${ynItem('ftp.phivolcs', 'PHIVOLCS passed?', d.ftp.phivolcs)}
+      ${ynItem('ftp.namria', 'NAMRIA passed?', d.ftp.namria)}
+    </div>
+
+    <div class="card">
+      <h3>H. Data downloading</h3>
+      <div class="item">
+        <div class="item-label">Logging sessions downloaded</div>
+        ${multi('download.sessions', SESSIONS, d.download.sessions)}
+        ${text('download.other', d.download.other, 'Other sessions and remarks')}
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>I. Notes</h3>
+      <textarea data-path="notes" rows="5" placeholder="Findings and recommendations">${esc(d.notes)}</textarea>
+    </div>
+
+    <div class="card">
+      <h3>J. Contact person</h3>
+      <label>Name</label>${text('contact.person', d.contact.person)}
+      <label>Contact number</label>${text('contact.number', d.contact.number, '', 'tel')}
+      <label>Designation</label>${text('contact.designation', d.contact.designation)}
+      <label>Email</label>${text('contact.email', d.contact.email, '', 'email')}
+    </div>
+
+    <div class="card">
+      <h3>K. Site photos</h3>
+      ${photoBox('sitePhotos')}
+    </div>
+
+    <div class="card">
+      <h3>L. Submit</h3>
+      <label>Station status after visit</label>
+      <select data-path="stationStatusAfter">
+        <option value="">Choose...</option>
+        ${STATION_STATUSES.map(s => `<option ${s === d.stationStatusAfter ? 'selected' : ''}>${s}</option>`).join('')}
+      </select>
+      <div class="flag" id="flag-stationStatus">Differs from SiteMetaData: ${esc(st.status || '(blank)')}</div>
+      <button class="btn" id="submit">${submitLabel}</button>
+      <p class="muted" style="margin-bottom:0">With no signal, it waits on this device and sends automatically later.</p>
+    </div>
+
+    <button class="btn danger" id="del">Delete from this device</button>`;
+
+  /* navigation */
+  document.getElementById('back').onclick = async () => { await saveNow(); showHome(); };
   document.getElementById('del').onclick = async () => {
-    if (!confirm('Delete this draft from the device? This cannot be undone.')) return;
+    const extra = d.status === 'Submitted' ? ' The copy already sent to the server stays.' : '';
+    if (!confirm('Delete this logsheet from the device? This cannot be undone.' + extra)) return;
+    for (const p of await photosFor(d.id)) await photoDel(p.id);
     await draftDel(d.id);
     showHome();
   };
+  document.getElementById('submit').onclick = async () => {
+    const msg = d.status === 'Submitted' ? 'Submit your changes for approval again?' : 'Submit this logsheet?';
+    if (!confirm(msg)) return;
+    S.draft.status = 'Queued';
+    S.draft.queuedAt = Date.now();
+    S.draft.syncError = '';
+    await saveNow();
+    showHome();
+    syncAll();
+  };
 
-  $app.querySelectorAll('[data-path]').forEach(inp => inp.addEventListener('input', () => {
-    setPath(S.draft, inp.dataset.path, inp.value);
-    computeMismatches();
-    scheduleSave();
-  }));
+  /* text inputs, textareas, selects */
+  $app.querySelectorAll('[data-path]').forEach(inp => {
+    const handler = () => { setPath(S.draft, inp.dataset.path, inp.value); computeMismatches(); scheduleSave(); };
+    inp.addEventListener('input', handler);
+    if (inp.tagName === 'SELECT') inp.addEventListener('change', handler);
+  });
 
+  /* field party */
   $app.querySelectorAll('[data-party]').forEach(b => b.onclick = () => {
     const p = b.dataset.party, list = S.draft.visit.party, i = list.indexOf(p);
     if (i === -1) list.push(p); else list.splice(i, 1);
@@ -370,13 +679,42 @@ function showForm(d) {
     scheduleSave();
   });
 
-  $app.querySelectorAll('[data-yn]').forEach(group => group.querySelectorAll('button').forEach(b => b.onclick = () => {
-    const path = group.dataset.yn;
-    const val = getPath(S.draft, path) === b.dataset.v ? '' : b.dataset.v; // tap again to clear
+  /* single choice (tap again to clear) */
+  $app.querySelectorAll('[data-choice]').forEach(group => group.querySelectorAll('button').forEach(b => b.onclick = () => {
+    const path = group.dataset.choice;
+    const val = getPath(S.draft, path) === b.dataset.v ? '' : b.dataset.v;
     setPath(S.draft, path, val);
     group.querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.v === val));
     scheduleSave();
   }));
+
+  /* multi choice */
+  $app.querySelectorAll('[data-multi]').forEach(group => group.querySelectorAll('button').forEach(b => b.onclick = () => {
+    const path = group.dataset.multi;
+    const list = (getPath(S.draft, path) || []).slice();
+    const i = list.indexOf(b.dataset.v);
+    if (i === -1) list.push(b.dataset.v); else list.splice(i, 1);
+    setPath(S.draft, path, list);
+    b.classList.toggle('on', i === -1);
+    scheduleSave();
+  }));
+
+  /* photos */
+  $app.querySelectorAll('[data-photo]').forEach(inp => {
+    renderThumbs(inp.dataset.photo);
+    inp.onchange = async () => {
+      const group = inp.dataset.photo;
+      for (const file of Array.from(inp.files || [])) {
+        try {
+          const dataUrl = await compressImage(file);
+          await photoPut({ id: crypto.randomUUID(), draftId: S.draft.id, group: group, dataUrl: dataUrl, uploaded: false, addedAt: Date.now() });
+        } catch (err) { alert(err.message); }
+      }
+      inp.value = '';
+      renderThumbs(group);
+      scheduleSave();
+    };
+  });
 
   computeMismatches();
   window.scrollTo(0, 0);
@@ -392,5 +730,6 @@ async function boot() {
   if (!S.session) return showLogin();
   await showHome();
   refreshStations(true);
+  syncAll();
 }
 boot();
