@@ -71,7 +71,10 @@ async function api(action, data) {
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     body: JSON.stringify(body)
   });
-  const json = await res.json();
+  const text = await res.text();
+  let json;
+  try { json = JSON.parse(text); }
+  catch (e) { throw new Error('Server did not reply with data. Check the web app URL in config.js and that the deployment is updated (HTTP ' + res.status + ').'); }
   if (!json.ok) throw new Error(json.error || 'Request failed');
   return json;
 }
@@ -108,17 +111,26 @@ window.addEventListener('offline', updateNet);
 /* ---------- Login ---------- */
 function showLogin(msg) {
   S.draft = null;
+  document.body.classList.add('login-mode');
   const lastUser = S.session ? S.session.user : '';
   $app.innerHTML = `
-    <div class="card">
-      <h2>Log in</h2>
-      <p class="muted">Use the same username and password as the scheduling form.</p>
-      <label>Username</label>
-      <input id="u" autocomplete="username" autocapitalize="characters" value="${esc(lastUser)}">
-      <label>Password</label>
-      <input id="p" type="password" autocomplete="current-password">
-      <button class="btn" id="go">Log in</button>
-      <div class="msg err" id="msg">${esc(msg || '')}</div>
+    <div class="login-wrap">
+      <img class="logo-top" src="logo-top.png" alt="MOVE Faults" onerror="this.style.display='none'">
+      <div class="login-card">
+        <div class="login-head">
+          <h1>SIGN IN</h1>
+          <p>Digital Logsheet</p>
+        </div>
+        <div class="login-body">
+          <label for="u">USERNAME</label>
+          <input id="u" placeholder="Enter username" autocomplete="username" autocapitalize="characters" value="${esc(lastUser)}">
+          <label for="p">PASSWORD</label>
+          <input id="p" type="password" placeholder="Enter password" autocomplete="current-password">
+          <button class="btn" id="go">Log in</button>
+          <div class="msg err" id="msg">${esc(msg || '')}</div>
+        </div>
+      </div>
+      <img class="logo-footer" src="logo-footer.png" alt="DOST-PHIVOLCS" onerror="this.style.display='none'">
     </div>`;
   const u = document.getElementById('u'), p = document.getElementById('p'), go = document.getElementById('go');
   u.addEventListener('keydown', e => { if (e.key === 'Enter') p.focus(); });
@@ -135,7 +147,9 @@ function showLogin(msg) {
       await refreshStations(false);
       showHome();
     } catch (err) {
-      m.textContent = err.message;
+      m.textContent = err.message === 'Failed to fetch'
+        ? 'Could not reach the server. Check your signal and the web app URL in config.js.'
+        : err.message;
       go.disabled = false; go.textContent = 'Log in';
     }
   };
@@ -151,6 +165,7 @@ async function logout() {
 /* ---------- Home ---------- */
 async function showHome() {
   S.draft = null;
+  document.body.classList.remove('login-mode');
   const drafts = (await draftsAll()).sort((a, b) => b.updatedAt - a.updatedAt);
   const expired = !tokenValid();
   $app.innerHTML = `

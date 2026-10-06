@@ -1,9 +1,14 @@
 /***** Service worker: makes the app open with no signal *****/
-const CACHE = 'mf-logsheet-v1'; // bump this (v2, v3...) every time you change any file
+const CACHE = 'mf-logsheet-v3'; // bump this (v2, v3...) every time you change any file
+const OPTIONAL = ['logo-top.png', 'logo-footer.png']; // cached if present
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icon.svg'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(
+    caches.open(CACHE)
+      .then(c => c.addAll(SHELL).then(() => Promise.all(OPTIONAL.map(f => c.add(f).catch(() => null)))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', e => {
