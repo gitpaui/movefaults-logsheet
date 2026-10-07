@@ -125,27 +125,40 @@ async function refreshStations(silent) {
   }
 }
 
+/* ---------- Pull this user's logsheets from the server (restores them on a new or cleared device) ---------- */
+async function pullMine() {
+  const r = await api('listMine');
+  const local = {};
+  (await draftsAll()).forEach(d => { local[d.id] = d; });
+  for (const it of r.items) {
+    const ld = local[it.id];
+    if (ld && ['Draft', 'Queued'].includes(ld.status)) continue;      // unsent local edits win
+    if (ld && ld.serverVersion === it.version && ld.status === it.status && (ld.pdfUrl || '') === it.pdfUrl) continue;
+    const x = it.data || {};
+    const st = S.stations.find(s => s.code === x.siteCode) || {};
+    const d = Object.assign({}, x, {
+      id: it.id,
+      siteCode: x.siteCode,
+      status: it.status,
+      serverVersion: it.version,
+      createdBy: x.createdBy,
+      createdAt: x.createdAt || Date.now(),
+      updatedAt: ld ? ld.updatedAt : Date.now(),
+      prefill: ld && ld.prefill ? ld.prefill : Object.assign({}, st, x.siteMetaDataSnapshot || {}),
+      pdfUrl: it.pdfUrl, pdfDownload: it.pdfDownload, approvedBy: it.approvedBy,
+      returnComment: it.returnComment, returnedBy: it.returnedBy,
+      mismatches: x.mismatches || []
+    });
+    d.serverPhotos = x.photos || []; delete d.photos; delete d.siteMetaDataSnapshot;
+    await draftPut(ensureShape(d));
+  }
+}
+
 /* ---------- Server status of sent logsheets ---------- */
 async function refreshStatuses() {
   if (!navigator.onLine || !tokenValid()) return;
   try {
-    const sent = (await draftsAll()).filter(d => ['Submitted', 'Returned', 'Approved'].includes(d.status));
-    if (sent.length) {
-      const r = await api('getStatuses', { ids: sent.map(d => d.id) });
-      for (const d of sent) {
-        const s = r.statuses[d.id];
-        if (!s || s.version !== d.serverVersion) continue; // a newer local or server copy exists
-        if (s.status !== d.status || s.pdfUrl !== (d.pdfUrl || '') || s.returnComment !== (d.returnComment || '')) {
-          d.status = s.status;
-          d.pdfUrl = s.pdfUrl;
-          d.returnComment = s.returnComment;
-          d.returnedBy = s.returnedBy;
-          d.approvedBy = s.approvedBy;
-          d.pdfDownload = s.pdfDownload;
-          await draftPut(d);
-        }
-      }
-    }
+    await pullMine(); // also brings back current status, PDF links and return comments
     if (isApprover()) {
       const r2 = await api('listForApproval');
       S.approvals = r2.items;
@@ -171,7 +184,8 @@ function buildPayload(d, photos) {
       antennaModel: p.antennaModel, antennaSerial: p.antennaSerial, power: p.power
     },
     photosFolderUrl: d.photosFolderUrl || '',
-    photos: photos.filter(x => x.uploaded).map(x => ({ id: x.id, group: x.group, url: x.url, fileId: x.fileId }))
+    photos: (d.serverPhotos || []).filter(sp => !photos.some(x => x.id === sp.id))
+      .concat(photos.filter(x => x.uploaded).map(x => ({ id: x.id, group: x.group, url: x.url, fileId: x.fileId })))
   };
 }
 
