@@ -20,7 +20,7 @@ const SESSIONS = ['01S_01H', '30S_01H'];
 const STATION_STATUSES = ['Active', 'Under Maintenance', 'Decommissioned', 'Archived'];
 
 const $app = document.getElementById('app');
-const S = { session: null, stations: [], stationsAt: null, draft: null, screen: '', approvals: [] };
+const S = { session: null, stations: [], stationsAt: null, draft: null, screen: '', approvals: [], approvedAll: [] };
 
 /* ---------- Helpers ---------- */
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
@@ -158,9 +158,23 @@ async function pullMine(items) {
 async function refreshStatuses() {
   if (!navigator.onLine || !tokenValid()) return;
   try {
-    const r = await api('refresh'); // one call: my logsheets + approval queue
+    const known = {};
+    (await draftsAll()).forEach(d => {
+      if (d.serverVersion) known[d.id] = d.serverVersion + '|' + d.status + '|' + (d.pdfUrl || '');
+    });
+    const r = await api('refresh', { known: known }); // one call; only changed logsheets come back
     await pullMine(r.mine);
-    if (isApprover()) S.approvals = r.approvals;
+    if (isApprover()) {
+      S.approvals = r.approvals;
+      S.approvedAll = r.approved || [];
+      await kvSet('approvedAll', S.approvedAll);
+      // a PDF still being made: check again in a minute
+      clearTimeout(S.pdfPoll);
+      if (S.approvedAll.some(x => !x.pdfUrl)) S.pdfPoll = setTimeout(refreshStatuses, 60000);
+    }
+    if ((await draftsAll()).some(d => d.status === 'Approved' && !d.pdfUrl)) {
+      clearTimeout(S.pdfPoll2); S.pdfPoll2 = setTimeout(refreshStatuses, 60000);
+    }
   } catch (err) {
     if (err.message === 'Session expired') await markExpired();
   }
@@ -273,8 +287,13 @@ function showLogin(msg) {
       const r = await api('login', { username: u.value, password: p.value });
       S.session = { token: r.token, user: r.user, roles: r.roles, firstName: r.firstName || r.user, expires: Date.now() + r.hours * 3600 * 1000 };
       await kvSet('session', S.session);
-      go.textContent = 'Loading stations...';
-      await refreshStations(false);
+      if (r.stations) {
+        S.stations = r.stations; S.stationsAt = Date.now();
+        await kvSet('stations', S.stations); await kvSet('stationsAt', S.stationsAt);
+      } else {
+        go.textContent = 'Loading stations...';
+        await refreshStations(false);
+      }
       showHome();
       syncAll();
     } catch (err) {
@@ -300,6 +319,27 @@ function greeting() {
   return part + ', ' + ((S.session && (S.session.firstName || S.session.user)) || '');
 }
 
+/* ---------- PDF links (always shown for approved logsheets) ---------- */
+function pdfLinks(d) {
+  if (!d.pdfUrl) return `<div class="pdf-links muted">PDF is being prepared. It will appear here shortly.</div>`;
+  const dl = d.pdfDownload || ('https://drive.google.com/uc?export=download&id=' + ((d.pdfUrl.match(/\/d\/([\w-]+)/) || [])[1] || ''));
+  return `<div class="pdf-links"><a class="btn small ghost dark" href="${esc(d.pdfUrl)}" target="_blank" rel="noopener">View PDF</a> <a class="btn small ghost dark" href="${esc(dl)}">Download PDF</a></div>`;
+}
+
+function approvedArchiveCard() {
+  const list = S.approvedAll || [];
+  return `
+    <div class="card">
+      <div class="between"><h2 style="margin:0">Approved logsheets (all)</h2><span class="pill">${list.length}</span></div>
+      ${list.length ? list.map(x => `
+        <div class="list-item static">
+          <div class="between"><b>${esc(x.siteCode)}</b><span class="pill st-Approved">Approved v${x.version}</span></div>
+          <div class="muted">Visit: ${esc((x.visit || '').replace('T', ' '))} · By ${esc(x.submittedBy)}</div>
+          <div class="muted">Approved by ${esc(x.approvedBy)} on ${esc(x.approvedAt)}</div>
+        </div>${pdfLinks(x)}`).join('') : '<p class="muted">No approved logsheets yet.</p>'}
+    </div>`;
+}
+
 /* ---------- Home ---------- */
 function draftCard(d) {
   const label = { Draft: 'Draft', Queued: 'Waiting to sync', Submitted: 'Waiting for approval', Returned: 'Returned', Approved: 'Approved' }[d.status] || d.status;
@@ -309,9 +349,9 @@ function draftCard(d) {
       <div class="muted">${esc(d.visit.address || '')}</div>
       <div class="muted">Visit: ${esc((d.visit.datetime || '').replace('T', ' '))} · Edited ${esc(fmtDate(d.updatedAt))}</div>
       ${d.syncError ? `<div class="msg err">Not sent yet: ${esc(d.syncError)}</div>` : ''}
-      ${d.status === 'Approved' && d.pdfUrl ? `<div class="muted">PDF ready: open the logsheet to view or download.</div>` : ''}
+
       ${d.status === 'Returned' && d.returnComment ? `<div class="msg err">${esc(d.returnedBy || 'Approver')}: ${esc(d.returnComment)}</div>` : ''}
-    </button>`;
+    </button>${d.status === 'Approved' ? pdfLinks(d) : ''}`;
 }
 
 async function showHome() {
@@ -371,6 +411,7 @@ async function showHome() {
       <div class="between"><h2 style="margin:0">Approved</h2><span class="pill">${approved.length}</span></div>
       ${approved.map(draftCard).join('')}
     </div>` : ''}
+    ${isApprover() ? approvedArchiveCard() : ''}
     <div class="card">
       <div class="between">
         <div>
@@ -616,7 +657,7 @@ function showForm(d) {
     ${d.status === 'Submitted' ? `<div class="banner" style="margin-top:12px">Submitted as v${d.serverVersion || 1}. Changes save on this device; tap <b>Submit changes</b> to send them for approval again.</div>` : ''}
     ${d.status === 'Queued' ? `<div class="banner" style="margin-top:12px">Waiting to sync. Edits you make now will be included when it sends.</div>` : ''}
     ${d.status === 'Returned' ? `<div class="banner danger" style="margin-top:12px"><b>Returned by ${esc(d.returnedBy || 'approver')}:</b> ${esc(d.returnComment || '')}<br>Make the changes, then tap <b>Submit changes</b>.</div>` : ''}
-    ${d.status === 'Approved' ? `<div class="banner ok" style="margin-top:12px"><b>Approved${d.approvedBy ? ' by ' + esc(d.approvedBy) : ''}.</b> ${d.pdfUrl ? `<a href="${esc(d.pdfUrl)}" target="_blank" rel="noopener">Open PDF</a>${d.pdfDownload ? ` · <a href="${esc(d.pdfDownload)}">Download PDF</a>` : ''}.` : ''} Submitting changes sends it for approval again.</div>` : ''}
+    ${d.status === 'Approved' ? `<div class="banner ok" style="margin-top:12px"><b>Approved${d.approvedBy ? ' by ' + esc(d.approvedBy) : ''}.</b> ${!d.pdfUrl ? 'PDF is being prepared.' : ''}${d.pdfUrl ? `<a href="${esc(d.pdfUrl)}" target="_blank" rel="noopener">Open PDF</a>${d.pdfDownload ? ` · <a href="${esc(d.pdfDownload)}">Download PDF</a>` : ''}.` : ''} Submitting changes sends it for approval again.</div>` : ''}
 
     <div class="card" style="margin-top:12px">
       <h3>A. Visit details</h3>
@@ -926,9 +967,10 @@ function showReview(it) {
     busy(true); dmsg.className = 'msg'; dmsg.textContent = 'Approving and creating the PDF... this can take up to a minute.';
     try {
       const r = await api('approveLogsheet', { id: it.id, version: it.version });
-      dmsg.innerHTML = `Approved. <a href="${esc(r.pdfUrl)}" target="_blank" rel="noopener">Open PDF</a>`;
+      dmsg.textContent = 'Approved. The PDF is being prepared and will appear for the team in about a minute.';
       S.approvals = S.approvals.filter(x => x.id !== it.id);
       document.getElementById('approve').textContent = 'Approved';
+      refreshStatuses(); // archive updates now; PDF links follow when ready
     } catch (err) {
       dmsg.className = 'msg err'; dmsg.textContent = err.message; busy(false);
     }
@@ -958,6 +1000,7 @@ async function boot() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
   S.session = await kvGet('session');
   S.stations = (await kvGet('stations')) || [];
+  S.approvedAll = (await kvGet('approvedAll')) || [];
   S.stationsAt = await kvGet('stationsAt');
   if (!S.session) return showLogin();
   await showHome();
