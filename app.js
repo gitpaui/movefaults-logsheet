@@ -20,7 +20,7 @@ const SESSIONS = ['01S_01H', '30S_01H'];
 const STATION_STATUSES = ['Active', 'Under Maintenance', 'Decommissioned', 'Archived'];
 
 const $app = document.getElementById('app');
-const S = { session: null, stations: [], stationsAt: null, draft: null, screen: '' };
+const S = { session: null, stations: [], stationsAt: null, draft: null, screen: '', approvals: [] };
 
 /* ---------- Helpers ---------- */
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
@@ -32,6 +32,7 @@ const localNow = () => {
 };
 const fmtDate = ms => ms ? new Date(ms).toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' }) : '—';
 const tokenValid = () => !!(S.session && S.session.token && S.session.expires > Date.now());
+const isApprover = () => !!(S.session && (S.session.roles || []).some(r => r.toLowerCase() === 'approver'));
 const getPath = (obj, path) => path.split('.').reduce((o, k) => (o ? o[k] : undefined), obj);
 const setPath = (obj, path, val) => {
   const keys = path.split('.');
@@ -114,6 +115,36 @@ async function refreshStations(silent) {
   }
 }
 
+/* ---------- Server status of sent logsheets ---------- */
+async function refreshStatuses() {
+  if (!navigator.onLine || !tokenValid()) return;
+  try {
+    const sent = (await draftsAll()).filter(d => ['Submitted', 'Returned', 'Approved'].includes(d.status));
+    if (sent.length) {
+      const r = await api('getStatuses', { ids: sent.map(d => d.id) });
+      for (const d of sent) {
+        const s = r.statuses[d.id];
+        if (!s || s.version !== d.serverVersion) continue; // a newer local or server copy exists
+        if (s.status !== d.status || s.pdfUrl !== (d.pdfUrl || '') || s.returnComment !== (d.returnComment || '')) {
+          d.status = s.status;
+          d.pdfUrl = s.pdfUrl;
+          d.returnComment = s.returnComment;
+          d.returnedBy = s.returnedBy;
+          d.approvedBy = s.approvedBy;
+          await draftPut(d);
+        }
+      }
+    }
+    if (isApprover()) {
+      const r2 = await api('listForApproval');
+      S.approvals = r2.items;
+    }
+  } catch (err) {
+    if (err.message === 'Session expired') await markExpired();
+  }
+  if (S.screen === 'home') showHome();
+}
+
 /* ---------- Sync queue ---------- */
 let syncing = false;
 function buildPayload(d, photos) {
@@ -170,7 +201,7 @@ async function syncAll() {
     }
   } finally {
     syncing = false;
-    if (S.screen === 'home') showHome();
+    await refreshStatuses();
   }
 }
 setInterval(syncAll, 60000);
@@ -217,7 +248,7 @@ function showLogin(msg) {
     go.disabled = true; go.textContent = 'Checking...'; m.textContent = '';
     try {
       const r = await api('login', { username: u.value, password: p.value });
-      S.session = { token: r.token, user: r.user, roles: r.roles, expires: Date.now() + r.hours * 3600 * 1000 };
+      S.session = { token: r.token, user: r.user, roles: r.roles, firstName: r.firstName || r.user, expires: Date.now() + r.hours * 3600 * 1000 };
       await kvSet('session', S.session);
       go.textContent = 'Loading stations...';
       await refreshStations(false);
@@ -239,15 +270,23 @@ async function logout() {
   showLogin();
 }
 
+/* ---------- Greeting ---------- */
+function greeting() {
+  const h = new Date().getHours();
+  const part = h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+  return part + ', ' + ((S.session && (S.session.firstName || S.session.user)) || '');
+}
+
 /* ---------- Home ---------- */
 function draftCard(d) {
-  const label = { Draft: 'Draft', Queued: 'Waiting to sync', Submitted: 'Submitted' }[d.status] || d.status;
+  const label = { Draft: 'Draft', Queued: 'Waiting to sync', Submitted: 'Waiting for approval', Returned: 'Returned', Approved: 'Approved' }[d.status] || d.status;
   return `
     <button class="list-item" data-open="${esc(d.id)}">
       <div class="between"><b>${esc(d.siteCode)}</b><span class="pill st-${esc(d.status)}">${esc(label)}${d.serverVersion ? ' v' + d.serverVersion : ''}</span></div>
       <div class="muted">${esc(d.visit.address || '')}</div>
       <div class="muted">Visit: ${esc((d.visit.datetime || '').replace('T', ' '))} · Edited ${esc(fmtDate(d.updatedAt))}</div>
       ${d.syncError ? `<div class="msg err">Not sent yet: ${esc(d.syncError)}</div>` : ''}
+      ${d.status === 'Returned' && d.returnComment ? `<div class="msg err">${esc(d.returnedBy || 'Approver')}: ${esc(d.returnComment)}</div>` : ''}
     </button>`;
 }
 
@@ -258,18 +297,35 @@ async function showHome() {
   const drafts = all.filter(d => d.status === 'Draft');
   const queued = all.filter(d => d.status === 'Queued');
   const sent = all.filter(d => d.status === 'Submitted');
+  const returned = all.filter(d => d.status === 'Returned');
+  const approved = all.filter(d => d.status === 'Approved');
   const expired = !tokenValid();
   $app.innerHTML = `
     ${expired ? `<div class="banner">Your session has ended. You can keep filling logsheets offline. <a href="#" id="relog" style="color:inherit;font-weight:700">Log in again</a> to sync.</div>` : ''}
-    <div class="between" style="margin-bottom:12px">
-      <div class="white">Hi, <b>${esc(S.session.user)}</b> <span class="pill">${esc((S.session.roles || []).join(', '))}</span></div>
+    <div class="between" style="margin-bottom:6px">
+      <h1 class="greet">${esc(greeting())}</h1>
       <button class="btn small ghost" id="out">Log out</button>
     </div>
-    <button class="btn" id="new">New Log Sheet</button>
+    <div style="margin-bottom:14px"><span class="pill">${esc((S.session.roles || []).join(', '))}</span></div>
+    ${isApprover() ? `
+    <div class="card approver-card">
+      <div class="between">
+        <div><h2 style="margin:0">Approvals</h2>
+          <p class="muted" style="margin:4px 0 0">${S.approvals.length ? S.approvals.length + ' logsheet' + (S.approvals.length > 1 ? 's' : '') + ' waiting for your review' : 'Nothing waiting. All caught up.'}</p></div>
+        <span class="big-count">${S.approvals.length}</span>
+      </div>
+      <button class="btn" id="approvals">Review logsheets</button>
+    </div>` : ''}
+    <button class="btn ${isApprover() ? 'ghost' : ''}" id="new">New Log Sheet</button>
     <div class="stats">
       <div class="stat"><b>${queued.length}</b><span>waiting to sync</span></div>
-      <div class="stat"><b>${sent.length}</b><span>submitted</span></div>
+      <div class="stat"><b>${sent.length}</b><span>waiting for approval</span></div>
     </div>
+    ${returned.length ? `
+    <div class="card returned">
+      <div class="between"><h2 style="margin:0">Returned — needs changes</h2><span class="pill">${returned.length}</span></div>
+      ${returned.map(draftCard).join('')}
+    </div>` : ''}
     ${queued.length ? `
     <div class="card">
       <div class="between"><h2 style="margin:0">Waiting to sync</h2>
@@ -282,9 +338,14 @@ async function showHome() {
     </div>
     ${sent.length ? `
     <div class="card">
-      <div class="between"><h2 style="margin:0">Submitted</h2><span class="pill">${sent.length}</span></div>
+      <div class="between"><h2 style="margin:0">Waiting for approval</h2><span class="pill">${sent.length}</span></div>
       <p class="muted" style="margin:6px 0 0">Open one to correct it and submit changes.</p>
       ${sent.map(draftCard).join('')}
+    </div>` : ''}
+    ${approved.length ? `
+    <div class="card">
+      <div class="between"><h2 style="margin:0">Approved</h2><span class="pill">${approved.length}</span></div>
+      ${approved.map(draftCard).join('')}
     </div>` : ''}
     <div class="card">
       <div class="between">
@@ -297,6 +358,8 @@ async function showHome() {
     </div>`;
   document.getElementById('out').onclick = logout;
   document.getElementById('new').onclick = showPicker;
+  const ap = document.getElementById('approvals');
+  if (ap) ap.onclick = showApprovals;
   document.getElementById('ref').onclick = async () => {
     if (!navigator.onLine) return alert('No signal. Stations will refresh when you are back online.');
     if (!tokenValid()) return showLogin('Session ended. Log in to refresh.');
@@ -519,7 +582,7 @@ function showForm(d) {
   S.draft = ensureShape(d);
   S.screen = 'form';
   const st = d.prefill;
-  const submitLabel = d.status === 'Submitted' ? 'Submit changes' : 'Submit Log Sheet';
+  const submitLabel = d.status === 'Draft' ? 'Submit Log Sheet' : 'Submit changes';
   $app.innerHTML = `
     <div class="between">
       <button class="btn small ghost" id="back">← Home</button>
@@ -527,6 +590,8 @@ function showForm(d) {
     </div>
     ${d.status === 'Submitted' ? `<div class="banner" style="margin-top:12px">Submitted as v${d.serverVersion || 1}. Changes save on this device; tap <b>Submit changes</b> to send them for approval again.</div>` : ''}
     ${d.status === 'Queued' ? `<div class="banner" style="margin-top:12px">Waiting to sync. Edits you make now will be included when it sends.</div>` : ''}
+    ${d.status === 'Returned' ? `<div class="banner danger" style="margin-top:12px"><b>Returned by ${esc(d.returnedBy || 'approver')}:</b> ${esc(d.returnComment || '')}<br>Make the changes, then tap <b>Submit changes</b>.</div>` : ''}
+    ${d.status === 'Approved' ? `<div class="banner ok" style="margin-top:12px"><b>Approved${d.approvedBy ? ' by ' + esc(d.approvedBy) : ''}.</b> ${d.pdfUrl ? `<a href="${esc(d.pdfUrl)}" target="_blank" rel="noopener">Open PDF</a>.` : ''} Submitting changes sends it for approval again.</div>` : ''}
 
     <div class="card" style="margin-top:12px">
       <h3>A. Visit details</h3>
@@ -646,14 +711,14 @@ function showForm(d) {
   /* navigation */
   document.getElementById('back').onclick = async () => { await saveNow(); showHome(); };
   document.getElementById('del').onclick = async () => {
-    const extra = d.status === 'Submitted' ? ' The copy already sent to the server stays.' : '';
+    const extra = ['Submitted', 'Returned', 'Approved'].includes(d.status) ? ' The copy already sent to the server stays.' : '';
     if (!confirm('Delete this logsheet from the device? This cannot be undone.' + extra)) return;
     for (const p of await photosFor(d.id)) await photoDel(p.id);
     await draftDel(d.id);
     showHome();
   };
   document.getElementById('submit').onclick = async () => {
-    const msg = d.status === 'Submitted' ? 'Submit your changes for approval again?' : 'Submit this logsheet?';
+    const msg = d.status === 'Draft' ? 'Submit this logsheet?' : 'Submit your changes for approval again?';
     if (!confirm(msg)) return;
     S.draft.status = 'Queued';
     S.draft.queuedAt = Date.now();
@@ -720,6 +785,140 @@ function showForm(d) {
   window.scrollTo(0, 0);
 }
 
+/* ---------- Approvals (Approver role) ---------- */
+async function showApprovals() {
+  S.screen = 'approvals';
+  $app.innerHTML = `
+    <button class="btn small ghost" id="back">← Home</button>
+    <div class="card" style="margin-top:12px">
+      <h2>Waiting for approval</h2>
+      <div id="alist"><p class="muted">Loading...</p></div>
+    </div>`;
+  document.getElementById('back').onclick = showHome;
+  const box = document.getElementById('alist');
+  if (!navigator.onLine) { box.innerHTML = '<p class="muted">Approvals need signal. Connect and try again.</p>'; return; }
+  if (!tokenValid()) return showLogin('Session ended. Log in to review approvals.');
+  try {
+    const r = await api('listForApproval');
+    S.approvals = r.items;
+  } catch (err) {
+    if (err.message === 'Session expired') { await markExpired(); return showLogin('Session ended. Log in to review approvals.'); }
+    box.innerHTML = `<p class="msg err">${esc(err.message)}</p>`;
+    return;
+  }
+  if (S.screen !== 'approvals') return;
+  box.innerHTML = S.approvals.length ? S.approvals.map(it => `
+    <button class="list-item" data-review="${esc(it.id)}">
+      <div class="between"><b>${esc(it.siteCode)}</b><span class="pill">v${it.version}</span></div>
+      <div class="muted">Visit: ${esc(it.visit)} · ${esc(it.party)}</div>
+      <div class="muted">Submitted by ${esc(it.submittedBy)} on ${esc(it.submittedAt)}</div>
+      ${it.flags ? `<div class="flag show">${(it.data.mismatches || []).length} difference(s) from SiteMetaData</div>` : ''}
+    </button>`).join('') : '<p class="muted">Nothing waiting. All caught up.</p>';
+  box.querySelectorAll('[data-review]').forEach(b => b.onclick = () => showReview(S.approvals.find(x => x.id === b.dataset.review)));
+}
+
+function summaryHtml(x) {
+  const row = (l, v) => `<div class="sum-row"><span>${esc(l)}</span><b>${esc(v || '—')}</b></div>`;
+  const ynv = o => !o ? '—' : (o.ok || '—') + (o.remarks ? ' · ' + o.remarks : '');
+  const lvv = o => !o ? '—' : (o.level || '—') + (o.remarks ? ' · ' + o.remarks : '');
+  const v = x.visit || {}, eq = x.equipment || {}, b = eq.before || {}, a = eq.after || {};
+  const sys = x.system || {}, pw = x.power || {}, net = x.network || {}, rc = x.receiverConfig || {};
+  const ftp = x.ftp || {}, dl = x.download || {}, ct = x.contact || {};
+  const groupName = { sitePhotos: 'Site photo', simReplaced: 'SIM replacement', loadSufficient: 'Prepaid load' };
+  return `
+    <div class="card"><h3>A. Visit details</h3>
+      ${row('Address', v.address)}${row('Date and time', (v.datetime || '').replace('T', ' '))}${row('Field party', (v.party || []).join(', '))}
+    </div>
+    <div class="card"><h3>B. Equipment</h3>
+      <table class="eq"><thead><tr><th></th><th>Before</th><th>After</th></tr></thead><tbody>
+        ${EQ_ROWS.map(([k, l]) => `<tr><td class="lbl">${l}</td><td>${esc(b[k] || '—')}</td><td>${esc(a[k] || '')}</td></tr>`).join('')}
+      </tbody></table>
+      ${row('Power failure', eq.powerFailure)}
+    </div>
+    ${(x.mismatches || []).length ? `<div class="card"><h3>Differences from SiteMetaData</h3>
+      ${x.mismatches.map(m => `<div class="sum-row"><span>${esc(m.label)}</span><b class="warn">${esc(m.sitemetadata || '(blank)')} → ${esc(m.field_value || '(blank)')}</b></div>`).join('')}
+    </div>` : ''}
+    <div class="card"><h3>C. System check</h3>${SYSTEM_ITEMS.map(([k, l]) => row(l, ynv(sys[k]))).join('')}</div>
+    <div class="card"><h3>D. Power source</h3>
+      ${row('Battery', (pw.battery || '—') + (pw.batteryStatus ? ' · ' + pw.batteryStatus : ''))}
+      ${row('Charger', ((pw.charger || []).join(', ') || '—') + (pw.chargerStatus ? ' · ' + pw.chargerStatus : ''))}
+    </div>
+    <div class="card"><h3>E. Network</h3>
+      ${row('Router functional', ynv(net.router))}${row('SIM replacement done', ynv(net.simReplaced))}${row('Prepaid load sufficient', ynv(net.loadSufficient))}
+    </div>
+    <div class="card"><h3>F. Receiver configuration</h3>
+      ${row('Unit logging', ynv(rc.logging))}${row('SD card storage', lvv(rc.sdCard))}${row('Navigated position', lvv(rc.navPosition))}
+    </div>
+    <div class="card"><h3>G. FTP push test</h3>${row('PHIVOLCS', ynv(ftp.phivolcs))}${row('NAMRIA', ynv(ftp.namria))}</div>
+    <div class="card"><h3>H. Data downloading</h3>${row('Sessions', (dl.sessions || []).join(', '))}${row('Other / remarks', dl.other)}</div>
+    <div class="card"><h3>I. Notes</h3><p style="white-space:pre-wrap;margin:0">${esc(x.notes || '—')}</p></div>
+    <div class="card"><h3>J. Contact person</h3>
+      ${row('Name', ct.person)}${row('Number', ct.number)}${row('Designation', ct.designation)}${row('Email', ct.email)}
+    </div>
+    <div class="card"><h3>K. Photos</h3>
+      ${(x.photos || []).length ? `<div class="thumbs">${x.photos.map(p => `
+        <a class="thumb" href="${esc(p.url)}" target="_blank" rel="noopener">
+          <img src="https://drive.google.com/thumbnail?id=${esc(p.fileId)}&sz=w400" alt="" onerror="this.style.display='none'">
+          <span class="up">${esc(groupName[p.group] || p.group)}</span>
+        </a>`).join('')}</div>` : '<p class="muted" style="margin:0">No photos.</p>'}
+    </div>
+    <div class="card"><h3>L. Station status after visit</h3>${row('Status', x.stationStatusAfter)}</div>`;
+}
+
+function showReview(it) {
+  if (!it) return showApprovals();
+  S.screen = 'review';
+  $app.innerHTML = `
+    <button class="btn small ghost" id="back">← Approvals</button>
+    <div class="card" style="margin-top:12px">
+      <div class="between"><h2 style="margin:0">${esc(it.siteCode)}</h2><span class="pill">v${it.version}</span></div>
+      <p class="muted" style="margin:6px 0 0">Submitted by ${esc(it.submittedBy)} on ${esc(it.submittedAt)}</p>
+    </div>
+    ${summaryHtml(it.data)}
+    <div class="card">
+      <h3>Decision</h3>
+      <button class="btn" id="approve">Approve</button>
+      <label>Comment for the team (required to return)</label>
+      <textarea id="rcomment" rows="3" placeholder="What needs to be fixed?"></textarea>
+      <button class="btn danger" id="return">Return for changes</button>
+      <div class="msg" id="dmsg"></div>
+    </div>`;
+  document.getElementById('back').onclick = showApprovals;
+  const dmsg = document.getElementById('dmsg');
+  const busy = on => ['approve', 'return'].forEach(id => { document.getElementById(id).disabled = on; });
+
+  document.getElementById('approve').onclick = async () => {
+    if (!navigator.onLine) return alert('Approving needs signal.');
+    if (!confirm('Approve ' + it.siteCode + ' v' + it.version + '? This creates the PDF.')) return;
+    busy(true); dmsg.className = 'msg'; dmsg.textContent = 'Approving and creating the PDF... this can take up to a minute.';
+    try {
+      const r = await api('approveLogsheet', { id: it.id, version: it.version });
+      dmsg.innerHTML = `Approved. <a href="${esc(r.pdfUrl)}" target="_blank" rel="noopener">Open PDF</a>`;
+      S.approvals = S.approvals.filter(x => x.id !== it.id);
+      document.getElementById('approve').textContent = 'Approved';
+    } catch (err) {
+      dmsg.className = 'msg err'; dmsg.textContent = err.message; busy(false);
+    }
+  };
+
+  document.getElementById('return').onclick = async () => {
+    const comment = document.getElementById('rcomment').value.trim();
+    if (!comment) { dmsg.className = 'msg err'; dmsg.textContent = 'Add a comment so the team knows what to fix.'; return; }
+    if (!navigator.onLine) return alert('Returning needs signal.');
+    if (!confirm('Return ' + it.siteCode + ' to the team?')) return;
+    busy(true); dmsg.className = 'msg'; dmsg.textContent = 'Returning...';
+    try {
+      await api('returnLogsheet', { id: it.id, version: it.version, comment: comment });
+      S.approvals = S.approvals.filter(x => x.id !== it.id);
+      dmsg.textContent = 'Returned to the team.';
+      document.getElementById('return').textContent = 'Returned';
+    } catch (err) {
+      dmsg.className = 'msg err'; dmsg.textContent = err.message; busy(false);
+    }
+  };
+  window.scrollTo(0, 0);
+}
+
 /* ---------- Boot ---------- */
 async function boot() {
   updateNet();
@@ -730,6 +929,6 @@ async function boot() {
   if (!S.session) return showLogin();
   await showHome();
   refreshStations(true);
-  syncAll();
+  syncAll(); // also refreshes statuses and approvals when done
 }
 boot();

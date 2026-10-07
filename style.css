@@ -162,3 +162,23 @@ textarea { resize: vertical; font-family: inherit; }
 .bar-logo.left { object-position: left center; }
 .bar-logo.right { object-position: right center; }
 @media (min-width: 600px) { .bar-logo { height: 42px; } }
+
+/* ---------- Approval (Week 3) ---------- */
+.banner.danger { background: rgba(217,83,79,.12); color: #b23c38; border-color: #d9534f; }
+.banner.ok { background: rgba(60,154,95,.12); color: #2f7a4b; border-color: #3c9a5f; }
+.banner a { color: inherit; font-weight: 700; }
+.card.returned { border: 2px solid #d9534f; }
+.pill.st-Returned { background: rgba(217,83,79,.15); color: #b23c38; }
+.pill.st-Approved { background: rgba(60,154,95,.15); color: #2f7a4b; }
+.sum-row { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.sum-row:first-of-type { border-top: none; }
+.sum-row span { color: var(--muted); }
+.sum-row b { text-align: right; font-weight: 600; }
+.sum-row b.warn { color: #b5781c; }
+.msg a { color: var(--teal-dark); font-weight: 700; }
+#approvals { margin-top: 10px; }
+
+/* ---------- Greeting and approver home ---------- */
+.greet { color: #fff; font-size: 24px; font-weight: 700; margin: 4px 0; }
+.approver-card { border-left: 5px solid var(--teal); }
+.big-count { font-size: 40px; font-weight: 700; color: var(--teal-dark); line-height: 1; }
