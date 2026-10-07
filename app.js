@@ -430,7 +430,7 @@ function defaultSections(st) {
     network: { router: yn(), simReplaced: yn(), loadSufficient: yn() },
     receiverConfig: { logging: yn(), sdCard: { level: '', remarks: '' }, navPosition: { level: '', remarks: '' } },
     ftp: { phivolcs: yn(), namria: yn() },
-    download: { sessions: [], other: '' },
+    download: { sessions: [], details: { '01S_01H': '', '30S_01H': '' }, other: '' },
     notes: '',
     contact: { person: '', number: '', designation: '', email: '' },
     stationStatusAfter: st.status || ''
@@ -441,6 +441,7 @@ function ensureShape(d) {
   const defs = defaultSections(d.prefill || {});
   Object.keys(defs).forEach(k => { if (d[k] == null) d[k] = defs[k]; });
   if (!d.mismatches) d.mismatches = [];
+  if (!d.download.details) d.download.details = { '01S_01H': '', '30S_01H': '' };
   return d;
 }
 
@@ -672,6 +673,14 @@ function showForm(d) {
       <div class="item">
         <div class="item-label">Logging sessions downloaded</div>
         ${multi('download.sessions', SESSIONS, d.download.sessions)}
+      </div>
+      ${SESSIONS.map(s => `
+      <div class="item">
+        <div class="item-label">${s} details</div>
+        <textarea data-path="download.details.${s}" rows="2" placeholder="e.g. files, date range, size">${esc(d.download.details[s] || '')}</textarea>
+      </div>`).join('')}
+      <div class="item">
+        <div class="item-label">Other sessions and remarks</div>
         ${text('download.other', d.download.other, 'Other sessions and remarks')}
       </div>
     </div>
@@ -850,7 +859,7 @@ function summaryHtml(x) {
       ${row('Unit logging', ynv(rc.logging))}${row('SD card storage', lvv(rc.sdCard))}${row('Navigated position', lvv(rc.navPosition))}
     </div>
     <div class="card"><h3>G. FTP push test</h3>${row('PHIVOLCS', ynv(ftp.phivolcs))}${row('NAMRIA', ynv(ftp.namria))}</div>
-    <div class="card"><h3>H. Data downloading</h3>${row('Sessions', (dl.sessions || []).join(', '))}${row('Other / remarks', dl.other)}</div>
+    <div class="card"><h3>H. Data downloading</h3>${row('Sessions', (dl.sessions || []).join(', '))}${SESSIONS.map(s => row(s + ' details', (dl.details || {})[s])).join('')}${row('Other / remarks', dl.other)}</div>
     <div class="card"><h3>I. Notes</h3><p style="white-space:pre-wrap;margin:0">${esc(x.notes || '—')}</p></div>
     <div class="card"><h3>J. Contact person</h3>
       ${row('Name', ct.person)}${row('Number', ct.number)}${row('Designation', ct.designation)}${row('Email', ct.email)}
