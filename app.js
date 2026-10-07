@@ -141,6 +141,7 @@ async function refreshStatuses() {
           d.returnComment = s.returnComment;
           d.returnedBy = s.returnedBy;
           d.approvedBy = s.approvedBy;
+          d.pdfDownload = s.pdfDownload;
           await draftPut(d);
         }
       }
@@ -296,6 +297,7 @@ function draftCard(d) {
       <div class="muted">${esc(d.visit.address || '')}</div>
       <div class="muted">Visit: ${esc((d.visit.datetime || '').replace('T', ' '))} · Edited ${esc(fmtDate(d.updatedAt))}</div>
       ${d.syncError ? `<div class="msg err">Not sent yet: ${esc(d.syncError)}</div>` : ''}
+      ${d.status === 'Approved' && d.pdfUrl ? `<div class="muted">PDF ready: open the logsheet to view or download.</div>` : ''}
       ${d.status === 'Returned' && d.returnComment ? `<div class="msg err">${esc(d.returnedBy || 'Approver')}: ${esc(d.returnComment)}</div>` : ''}
     </button>`;
 }
@@ -602,7 +604,7 @@ function showForm(d) {
     ${d.status === 'Submitted' ? `<div class="banner" style="margin-top:12px">Submitted as v${d.serverVersion || 1}. Changes save on this device; tap <b>Submit changes</b> to send them for approval again.</div>` : ''}
     ${d.status === 'Queued' ? `<div class="banner" style="margin-top:12px">Waiting to sync. Edits you make now will be included when it sends.</div>` : ''}
     ${d.status === 'Returned' ? `<div class="banner danger" style="margin-top:12px"><b>Returned by ${esc(d.returnedBy || 'approver')}:</b> ${esc(d.returnComment || '')}<br>Make the changes, then tap <b>Submit changes</b>.</div>` : ''}
-    ${d.status === 'Approved' ? `<div class="banner ok" style="margin-top:12px"><b>Approved${d.approvedBy ? ' by ' + esc(d.approvedBy) : ''}.</b> ${d.pdfUrl ? `<a href="${esc(d.pdfUrl)}" target="_blank" rel="noopener">Open PDF</a>.` : ''} Submitting changes sends it for approval again.</div>` : ''}
+    ${d.status === 'Approved' ? `<div class="banner ok" style="margin-top:12px"><b>Approved${d.approvedBy ? ' by ' + esc(d.approvedBy) : ''}.</b> ${d.pdfUrl ? `<a href="${esc(d.pdfUrl)}" target="_blank" rel="noopener">Open PDF</a>${d.pdfDownload ? ` · <a href="${esc(d.pdfDownload)}">Download PDF</a>` : ''}.` : ''} Submitting changes sends it for approval again.</div>` : ''}
 
     <div class="card" style="margin-top:12px">
       <h3>A. Visit details</h3>
