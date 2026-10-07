@@ -1,5 +1,5 @@
 /***** Service worker: makes the app open with no signal *****/
-const CACHE = 'mf-logsheet-v14'; // bump this (v2, v3...) every time you change any file
+const CACHE = 'mf-logsheet-v15'; // bump this (v2, v3...) every time you change any file
 const OPTIONAL = ['logo-top.png', 'logo-footer.png']; // cached if present
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icon.svg'];
 

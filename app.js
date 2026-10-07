@@ -32,7 +32,7 @@ const localNow = () => {
 };
 const fmtDate = ms => ms ? new Date(ms).toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' }) : '—';
 const tokenValid = () => !!(S.session && S.session.token && S.session.expires > Date.now());
-const emptyQueueMsg = () => (S.session && S.session.user === 'ZAGR') ? 'No approvals at the moment. Relax. How some BBQ' : 'Nothing waiting. All caught up.';
+const emptyQueueMsg = () => (S.session && S.session.user === 'ZAGR') ? 'No approvals at the moment. Relax. Have some BBQ' : 'Nothing waiting. All caught up.';
 const isApprover = () => !!(S.session && (S.session.roles || []).some(r => r.toLowerCase() === 'approver'));
 const getPath = (obj, path) => path.split('.').reduce((o, k) => (o ? o[k] : undefined), obj);
 const setPath = (obj, path, val) => {

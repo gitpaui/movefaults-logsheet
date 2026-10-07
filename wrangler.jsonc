@@ -8,6 +8,6 @@
     "run_worker_first": ["/api"]
   },
   "vars": {
-    "APPS_SCRIPT_URL": "https://script.google.com/macros/s/AKfycbwst6U-wMHxfYWYBYIW1RjEkLrkj6sPLa0KYAo4LHaXjRnd-yzfZmrqIxwCHiD-WKw/exec"
+    "APPS_SCRIPT_URL": "https://script.google.com/macros/s/AKfycbwDLVkwCRh6PmoBnyAVpGWg30MSKK_kNYeCtt2SBWCgYrx61AqMLehbbhCGwEECJ1FL/exec"
   }
 }
