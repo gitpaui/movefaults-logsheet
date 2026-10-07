@@ -55,11 +55,20 @@ function db() {
       if (!d.objectStoreNames.contains('drafts')) d.createObjectStore('drafts', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('photos')) d.createObjectStore('photos', { keyPath: 'id' });
     };
-    req.onsuccess = () => { _db = req.result; resolve(_db); };
+    req.onsuccess = () => {
+      _db = req.result;
+      _db.onclose = () => { _db = null; };          // site data cleared: reopen next time
+      _db.onversionchange = () => { _db.close(); _db = null; };
+      resolve(_db);
+    };
     req.onerror = () => reject(req.error);
   });
 }
 async function idb(store, mode, fn) {
+  try { return await idbOnce(store, mode, fn); }
+  catch (e) { _db = null; return idbOnce(store, mode, fn); } // retry once with a fresh connection
+}
+async function idbOnce(store, mode, fn) {
   const d = await db();
   return new Promise((resolve, reject) => {
     const t = d.transaction(store, mode);
