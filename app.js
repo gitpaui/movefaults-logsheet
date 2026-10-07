@@ -126,8 +126,8 @@ async function refreshStations(silent) {
 }
 
 /* ---------- Pull this user's logsheets from the server (restores them on a new or cleared device) ---------- */
-async function pullMine() {
-  const r = await api('listMine');
+async function pullMine(items) {
+  const r = { items: items };
   const local = {};
   (await draftsAll()).forEach(d => { local[d.id] = d; });
   for (const it of r.items) {
@@ -158,11 +158,9 @@ async function pullMine() {
 async function refreshStatuses() {
   if (!navigator.onLine || !tokenValid()) return;
   try {
-    await pullMine(); // also brings back current status, PDF links and return comments
-    if (isApprover()) {
-      const r2 = await api('listForApproval');
-      S.approvals = r2.items;
-    }
+    const r = await api('refresh'); // one call: my logsheets + approval queue
+    await pullMine(r.mine);
+    if (isApprover()) S.approvals = r.approvals;
   } catch (err) {
     if (err.message === 'Session expired') await markExpired();
   }
