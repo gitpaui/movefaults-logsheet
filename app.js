@@ -79,8 +79,13 @@ async function idbOnce(store, mode, fn) {
 }
 const kvGet = k => idb('kv', 'readonly', s => s.get(k));
 const kvSet = (k, v) => idb('kv', 'readwrite', s => s.put(v, k));
-const draftsAll = () => idb('drafts', 'readonly', s => s.getAll());
-const draftPut = d => idb('drafts', 'readwrite', s => s.put(d));
+// Drafts are kept per account: a filer only ever sees the logsheets saved under their own login.
+// Other filers' unsent drafts stay on the device, hidden, until they log in again.
+const curUser = () => (S.session && S.session.user) || '';
+const ownerOf = d => d.owner || d.createdBy || '';
+const draftsAll = () => idb('drafts', 'readonly', s => s.getAll())
+  .then(list => (list || []).filter(d => curUser() && ownerOf(d) === curUser()));
+const draftPut = d => { if (!d.owner) d.owner = curUser(); return idb('drafts', 'readwrite', s => s.put(d)); };
 const draftDel = id => idb('drafts', 'readwrite', s => s.delete(id));
 const photosAll = () => idb('photos', 'readonly', s => s.getAll());
 const photoPut = p => idb('photos', 'readwrite', s => s.put(p));
@@ -139,6 +144,8 @@ async function pullMine(items) {
   for (const it of r.items) {
     const ld = local[it.id];
     if (ld && ['Draft', 'Queued'].includes(ld.status)) continue;      // unsent local edits win
+    const raw = await idb('drafts', 'readonly', st => st.get(it.id));
+    if (raw && ownerOf(raw) !== curUser() && ['Draft', 'Queued'].includes(raw.status)) continue; // another filer's unsent work on this device
     if (hidden[it.id]) {
       if (it.status === 'Approved') continue;          // removed by the user: stay hidden while approved
       delete hidden[it.id]; hiddenChanged = true;       // sent back or edited again: show it again
@@ -152,6 +159,7 @@ async function pullMine(items) {
       status: it.status,
       serverVersion: it.version,
       createdBy: x.createdBy,
+      owner: curUser(),
       createdAt: x.createdAt || Date.now(),
       updatedAt: x.updatedAt || serverTime(it.submittedAt) || (ld && ld.updatedAt) || Date.now(),
       tsFixed: true,
@@ -562,6 +570,7 @@ async function startDraft(code) {
     siteCode: st.code,
     status: 'Draft',
     createdBy: S.session.user,
+    owner: S.session.user,
     createdAt: now,
     updatedAt: now,
     prefill: st,
