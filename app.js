@@ -126,14 +126,24 @@ async function refreshStations(silent) {
 }
 
 /* ---------- Pull this user's logsheets from the server (restores them on a new or cleared device) ---------- */
+function serverTime(s) {
+  const t = Date.parse(String(s || '').replace(' ', 'T'));
+  return isNaN(t) ? 0 : t;
+}
 async function pullMine(items) {
   const r = { items: items };
+  const hidden = (await kvGet('hidden')) || {};
+  let hiddenChanged = false;
   const local = {};
   (await draftsAll()).forEach(d => { local[d.id] = d; });
   for (const it of r.items) {
     const ld = local[it.id];
     if (ld && ['Draft', 'Queued'].includes(ld.status)) continue;      // unsent local edits win
-    if (ld && ld.serverVersion === it.version && ld.status === it.status && (ld.pdfUrl || '') === it.pdfUrl) continue;
+    if (hidden[it.id]) {
+      if (it.status === 'Approved') continue;          // removed by the user: stay hidden while approved
+      delete hidden[it.id]; hiddenChanged = true;       // sent back or edited again: show it again
+    }
+    if (ld && ld.tsFixed && ld.serverVersion === it.version && ld.status === it.status && (ld.pdfUrl || '') === it.pdfUrl) continue;
     const x = it.data || {};
     const st = S.stations.find(s => s.code === x.siteCode) || {};
     const d = Object.assign({}, x, {
@@ -143,7 +153,8 @@ async function pullMine(items) {
       serverVersion: it.version,
       createdBy: x.createdBy,
       createdAt: x.createdAt || Date.now(),
-      updatedAt: ld ? ld.updatedAt : Date.now(),
+      updatedAt: x.updatedAt || serverTime(it.submittedAt) || (ld && ld.updatedAt) || Date.now(),
+      tsFixed: true,
       prefill: ld && ld.prefill ? ld.prefill : Object.assign({}, st, x.siteMetaDataSnapshot || {}),
       pdfUrl: it.pdfUrl, pdfDownload: it.pdfDownload, approvedBy: it.approvedBy,
       returnComment: it.returnComment, returnedBy: it.returnedBy,
@@ -152,6 +163,7 @@ async function pullMine(items) {
     d.serverPhotos = x.photos || []; delete d.photos; delete d.siteMetaDataSnapshot;
     await draftPut(ensureShape(d));
   }
+  if (hiddenChanged) await kvSet('hidden', hidden);
 }
 
 /* ---------- Server status of sent logsheets ---------- */
@@ -159,10 +171,15 @@ async function refreshStatuses() {
   if (!navigator.onLine || !tokenValid()) return;
   try {
     const known = {};
+    const tsFixed = await kvGet('tsfix1');
+    const hidden = (await kvGet('hidden')) || {};
+    Object.keys(hidden).forEach(id => { known[id] = hidden[id]; });
     (await draftsAll()).forEach(d => {
-      if (d.serverVersion) known[d.id] = d.serverVersion + '|' + d.status + '|' + (d.pdfUrl || '');
+      if (d.serverVersion && (tsFixed || d.tsFixed)) known[d.id] = d.serverVersion + '|' + d.status + '|' + (d.pdfUrl || '');
     });
-    const r = await api('refresh', { known: known }); // one call; only changed logsheets come back
+    const hideApproved = Object.keys((await kvGet('hiddenArchive')) || {});
+    const r = await api('refresh', { known: known, hideApproved: hideApproved });
+    if (!tsFixed) await kvSet('tsfix1', true); // one call; only changed logsheets come back
     await pullMine(r.mine);
     if (isApprover()) {
       S.approvals = r.approvals;
@@ -186,7 +203,7 @@ let syncing = false;
 function buildPayload(d, photos) {
   const p = d.prefill || {};
   return {
-    id: d.id, siteCode: d.siteCode, createdBy: d.createdBy, createdAt: d.createdAt,
+    id: d.id, siteCode: d.siteCode, createdBy: d.createdBy, createdAt: d.createdAt, updatedAt: d.updatedAt,
     visit: d.visit, equipment: d.equipment, system: d.system, power: d.power,
     network: d.network, receiverConfig: d.receiverConfig, ftp: d.ftp, download: d.download,
     notes: d.notes, contact: d.contact, stationStatusAfter: d.stationStatusAfter,
@@ -330,13 +347,14 @@ function approvedArchiveCard() {
   const list = S.approvedAll || [];
   return `
     <div class="card">
-      <div class="between"><h2 style="margin:0">Approved logsheets (all)</h2><span class="pill">${list.length}</span></div>
+      <div class="between"><h2 style="margin:0">Approved logsheets (all)</h2>
+        <span><span class="pill">${list.length}</span> ${list.length ? '<button class="btn small ghost dark" id="clearArchive">Clear all</button>' : ''}</span></div>
       ${list.length ? list.map(x => `
         <div class="list-item static">
           <div class="between"><b>${esc(x.siteCode)}</b><span class="pill st-Approved">Approved v${x.version}</span></div>
           <div class="muted">Visit: ${esc((x.visit || '').replace('T', ' '))} · By ${esc(x.submittedBy)}</div>
           <div class="muted">Approved by ${esc(x.approvedBy)} on ${esc(x.approvedAt)}</div>
-        </div>${pdfLinks(x)}`).join('') : '<p class="muted">No approved logsheets yet.</p>'}
+        </div>${pdfLinks(x)}<div class="rm-row"><button class="link-btn" data-hidearch="${esc(x.id)}">Remove from this list</button></div>`).join('') : '<p class="muted">No approved logsheets yet.</p>'}
     </div>`;
 }
 
@@ -408,8 +426,10 @@ async function showHome() {
     </div>` : ''}
     ${approved.length ? `
     <div class="card">
-      <div class="between"><h2 style="margin:0">Approved</h2><span class="pill">${approved.length}</span></div>
-      ${approved.map(draftCard).join('')}
+      <div class="between"><h2 style="margin:0">Approved</h2>
+        <span><span class="pill">${approved.length}</span> <button class="btn small ghost dark" id="clearApproved">Clear all</button></span></div>
+      <p class="muted" style="margin:6px 0 0">Removing only clears this device. The logsheet and its PDF stay on the server.</p>
+      ${approved.map(d => draftCard(d) + `<div class="rm-row"><button class="link-btn" data-hide="${esc(d.id)}">Remove from this list</button></div>`).join('')}
     </div>` : ''}
     ${isApprover() ? approvedArchiveCard() : ''}
     <div class="card">
@@ -438,6 +458,30 @@ async function showHome() {
   };
   const relog = document.getElementById('relog');
   if (relog) relog.onclick = e => { e.preventDefault(); showLogin(); };
+  const hideMine = async ids => {
+    const hidden = (await kvGet('hidden')) || {};
+    const all = await draftsAll();
+    for (const id of ids) {
+      const d = all.find(x => x.id === id); if (!d) continue;
+      hidden[id] = d.serverVersion + '|' + d.status + '|' + (d.pdfUrl || '');
+      for (const p of await photosFor(id)) await photoDel(p.id);
+      await draftDel(id);
+    }
+    await kvSet('hidden', hidden); showHome();
+  };
+  const hideArch = async ids => {
+    const h = (await kvGet('hiddenArchive')) || {};
+    ids.forEach(id => { h[id] = 1; });
+    await kvSet('hiddenArchive', h);
+    S.approvedAll = (S.approvedAll || []).filter(x => !h[x.id]);
+    await kvSet('approvedAll', S.approvedAll); showHome();
+  };
+  $app.querySelectorAll('[data-hide]').forEach(b => b.onclick = () => hideMine([b.dataset.hide]));
+  $app.querySelectorAll('[data-hidearch]').forEach(b => b.onclick = () => hideArch([b.dataset.hidearch]));
+  const ca = document.getElementById('clearApproved');
+  if (ca) ca.onclick = () => { if (confirm('Remove all approved logsheets from this device? They stay on the server.')) hideMine(approved.map(d => d.id)); };
+  const cr = document.getElementById('clearArchive');
+  if (cr) cr.onclick = () => { if (confirm('Clear the approved archive on this device? New approvals will still appear.')) hideArch((S.approvedAll || []).map(x => x.id)); };
   $app.querySelectorAll('[data-open]').forEach(b => b.onclick = async () => {
     const d = (await draftsAll()).find(x => x.id === b.dataset.open);
     if (d) showForm(d);
@@ -780,10 +824,12 @@ function showForm(d) {
       <p class="muted" style="margin-bottom:0">With no signal, it waits on this device and sends automatically later.</p>
     </div>
 
-    <button class="btn danger" id="del">Delete from this device</button>`;
+    <button class="btn danger" id="del">Delete from this device</button>
+    <button class="btn ghost" id="toTop">Jump to top ↑</button>`;
 
   /* navigation */
   document.getElementById('back').onclick = async () => { await saveNow(); showHome(); };
+  document.getElementById('toTop').onclick = () => window.scrollTo({ top: 0, behavior: 'smooth' });
   document.getElementById('del').onclick = async () => {
     const extra = ['Submitted', 'Returned', 'Approved'].includes(d.status) ? ' The copy already sent to the server stays.' : '';
     if (!confirm('Delete this logsheet from the device? This cannot be undone.' + extra)) return;
