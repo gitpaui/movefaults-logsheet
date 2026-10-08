@@ -282,7 +282,7 @@ function showLogin(msg) {
   go.onclick = async () => {
     const m = document.getElementById('msg');
     if (!navigator.onLine) { m.textContent = 'You need signal to log in. Drafts already on this device are safe.'; return; }
-    go.disabled = true; go.textContent = 'Checking...'; m.textContent = '';
+    go.disabled = true; go.textContent = 'Logging in...'; m.textContent = '';
     try {
       const r = await api('login', { username: u.value, password: p.value });
       S.session = { token: r.token, user: r.user, roles: r.roles, firstName: r.firstName || r.user, expires: Date.now() + r.hours * 3600 * 1000 };
